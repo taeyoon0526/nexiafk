@@ -102,6 +102,15 @@ class NexiAFK(commands.Cog):
             return False
         return True
 
+    def _default_entry(self) -> Dict[str, Any]:
+        return {
+            "enabled": False,
+            "since_ts": 0,
+            "message_override": None,
+            "last_auto_reply_ts": 0,
+            "auto_clear_on_message": True,
+        }
+
     def _get_last_ts(
         self,
         entry: Dict[str, Any],
@@ -144,8 +153,9 @@ class NexiAFK(commands.Cog):
             key = str(ctx.author.id)
             entry = state.get(
                 key,
-                {"enabled": False, "since_ts": 0, "message_override": None, "last_auto_reply_ts": 0},
+                self._default_entry(),
             )
+            entry.setdefault("auto_clear_on_message", True)
             if not entry.get("enabled"):
                 entry["enabled"] = True
                 entry["since_ts"] = now
@@ -186,8 +196,9 @@ class NexiAFK(commands.Cog):
             key = str(ctx.author.id)
             entry = state.get(
                 key,
-                {"enabled": False, "since_ts": 0, "message_override": None, "last_auto_reply_ts": 0},
+                self._default_entry(),
             )
+            entry.setdefault("auto_clear_on_message", True)
             enabled = entry.get("enabled", False)
             since_ts = int(entry.get("since_ts", 0) or 0)
             if since_ts > 0:
@@ -197,8 +208,9 @@ class NexiAFK(commands.Cog):
             msg = entry.get("message_override") or (
                 await self.config.guild(ctx.guild).guild_default_message()
             )
+            auto_clear = "ON" if entry.get("auto_clear_on_message", True) else "OFF"
             await ctx.send(
-                f"AFK 상태: {'ON' if enabled else 'OFF'}\nAFK 시작: {since_txt}\n메시지: {msg}"
+                f"AFK 상태: {'ON' if enabled else 'OFF'}\nAFK 시작: {since_txt}\n메시지: {msg}\n자동 해제: {auto_clear}"
             )
         except Exception:
             log.exception("AFK 상태 조회 실패")
@@ -221,8 +233,9 @@ class NexiAFK(commands.Cog):
             key = str(ctx.author.id)
             entry = state.get(
                 key,
-                {"enabled": False, "since_ts": 0, "message_override": None, "last_auto_reply_ts": 0},
+                self._default_entry(),
             )
+            entry.setdefault("auto_clear_on_message", True)
             entry["message_override"] = message
             state[key] = entry
             await self.config.guild(ctx.guild).afk_state.set(state)
@@ -241,14 +254,56 @@ class NexiAFK(commands.Cog):
             key = str(ctx.author.id)
             entry = state.get(
                 key,
-                {"enabled": False, "since_ts": 0, "message_override": None, "last_auto_reply_ts": 0},
+                self._default_entry(),
             )
+            entry.setdefault("auto_clear_on_message", True)
             entry["message_override"] = None
             state[key] = entry
             await self.config.guild(ctx.guild).afk_state.set(state)
             await ctx.send("개인 AFK 멘트를 삭제했습니다.")
         except Exception:
             log.exception("AFK 멘트 삭제 실패")
+            await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+
+    
+    @afk_group.command(name="autoclear")
+    async def afk_autoclear(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
+        """메시지 전송 시 AFK 자동 해제 토글."""
+        if not await self._ensure_allowed(ctx):
+            return
+        if mode is None:
+            try:
+                state = await self.config.guild(ctx.guild).afk_state()
+                key = str(ctx.author.id)
+                entry = state.get(key, self._default_entry())
+                entry.setdefault("auto_clear_on_message", True)
+                await ctx.send(
+                    f"자동 해제: {'ON' if entry.get('auto_clear_on_message', True) else 'OFF'}"
+                )
+            except Exception:
+                log.exception("자동 해제 상태 조회 실패")
+                await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+            return
+
+        mode_l = mode.lower()
+        if mode_l in {"on", "true", "enable", "enabled", "1"}:
+            value = True
+        elif mode_l in {"off", "false", "disable", "disabled", "0"}:
+            value = False
+        else:
+            await ctx.send("값은 on/off 중 하나여야 합니다.")
+            return
+
+        try:
+            state = await self.config.guild(ctx.guild).afk_state()
+            key = str(ctx.author.id)
+            entry = state.get(key, self._default_entry())
+            entry["auto_clear_on_message"] = value
+            state[key] = entry
+            await self.config.guild(ctx.guild).afk_state.set(state)
+            await ctx.send(f"자동 해제: {'ON' if value else 'OFF'}")
+        except Exception:
+            log.exception("자동 해제 설정 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
 
     @commands.group(name="afkadmin", invoke_without_command=True)
@@ -422,11 +477,31 @@ class NexiAFK(commands.Cog):
             return
         if conf.get("ignore_bots") and message.author.bot:
             return
-        if not message.mentions:
-            return
 
         allowed = set(conf.get("allowed_user_ids", []))
         afk_state = conf.get("afk_state", {})
+
+        # AFK 사용자가 메시지를 보내면 자동 해제 (기본 ON)
+        author_key = str(message.author.id)
+        author_entry = afk_state.get(author_key)
+        if (
+            message.author.id in allowed
+            and author_entry
+            and author_entry.get("enabled")
+            and author_entry.get("auto_clear_on_message", True)
+        ):
+            author_entry["enabled"] = False
+            author_entry["since_ts"] = 0
+            author_entry["last_auto_reply_ts"] = 0
+            afk_state[author_key] = author_entry
+            try:
+                await self.config.guild(message.guild).afk_state.set(afk_state)
+            except Exception:
+                log.exception("자동 해제 저장 실패")
+
+        if not message.mentions:
+            return
+
         target_member: Optional[discord.Member] = None
         target_entry: Optional[Dict[str, Any]] = None
 
