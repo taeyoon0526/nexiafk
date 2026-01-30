@@ -20,6 +20,24 @@ def _now_ts() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp())
 
 
+def _format_duration(seconds: int) -> str:
+    if seconds <= 0:
+        return "0초"
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts = []
+    if days:
+        parts.append(f"{days}일")
+    if hours:
+        parts.append(f"{hours}시간")
+    if minutes:
+        parts.append(f"{minutes}분")
+    if sec and not parts:
+        parts.append(f"{sec}초")
+    return " ".join(parts) if parts else "0초"
+
+
 class NexiAFK(commands.Cog):
     """특정 사용자만 AFK를 사용하고 멘션 시 자동 응답하는 Cog."""
 
@@ -91,6 +109,18 @@ class NexiAFK(commands.Cog):
                         mentioner=message.author,
                         result="권한 부족 또는 전송 실패",
                     )
+    async def _safe_send_mention_reply(
+        self, message: discord.Message, content: str
+    ) -> None:
+        mention_content = f"{message.author.mention} {content}"
+        try:
+            await message.reply(mention_content, mention_author=False)
+        except (discord.Forbidden, discord.HTTPException):
+            try:
+                await message.channel.send(mention_content)
+            except Exception:
+                log.exception("멘션 reply/send 모두 실패")
+
 
     async def _ensure_allowed(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -490,6 +520,8 @@ class NexiAFK(commands.Cog):
             and author_entry.get("enabled")
             and author_entry.get("auto_clear_on_message", True)
         ):
+            since_ts = int(author_entry.get("since_ts", 0) or 0)
+            duration = _format_duration(max(0, _now_ts() - since_ts))
             author_entry["enabled"] = False
             author_entry["since_ts"] = 0
             author_entry["last_auto_reply_ts"] = 0
@@ -498,6 +530,10 @@ class NexiAFK(commands.Cog):
                 await self.config.guild(message.guild).afk_state.set(afk_state)
             except Exception:
                 log.exception("자동 해제 저장 실패")
+            await self._safe_send_mention_reply(
+                message,
+                f"돌아오신걸 환영합니다! AFK 지속시간: {duration}",
+            )
 
         if not message.mentions:
             return
@@ -538,7 +574,7 @@ class NexiAFK(commands.Cog):
             f"AFK 시작: {since_text}"
         )
 
-        await self._safe_send(message, content)
+        await self._safe_send_mention_reply(message, content)
 
         try:
             self._set_last_ts(target_entry, message.channel.id, per_channel, now)
