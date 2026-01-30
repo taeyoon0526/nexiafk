@@ -109,17 +109,16 @@ class NexiAFK(commands.Cog):
                         mentioner=message.author,
                         result="권한 부족 또는 전송 실패",
                     )
-    async def _safe_send_mention_reply(
-        self, message: discord.Message, content: str
+    async def _safe_send_embed(
+        self, message: discord.Message, embed: discord.Embed
     ) -> None:
-        mention_content = f"{message.author.mention} {content}"
         try:
-            await message.reply(mention_content, mention_author=False)
+            await message.reply(embed=embed, mention_author=False)
         except (discord.Forbidden, discord.HTTPException):
             try:
-                await message.channel.send(mention_content)
+                await message.channel.send(embed=embed)
             except Exception:
-                log.exception("멘션 reply/send 모두 실패")
+                log.exception("임베드 reply/send 모두 실패")
 
 
     async def _ensure_allowed(self, ctx: commands.Context) -> bool:
@@ -530,10 +529,9 @@ class NexiAFK(commands.Cog):
                 await self.config.guild(message.guild).afk_state.set(afk_state)
             except Exception:
                 log.exception("자동 해제 저장 실패")
-            await self._safe_send_mention_reply(
-                message,
-                f"돌아오신걸 환영합니다! AFK 지속시간: {duration}",
-            )
+            welcome_embed = discord.Embed(title="돌아오신걸 환영합니다!")
+            welcome_embed.add_field(name="AFK 지속시간", value=duration, inline=False)
+            await self._safe_send_embed(message, welcome_embed)
 
         if not message.mentions:
             return
@@ -568,13 +566,12 @@ class NexiAFK(commands.Cog):
         msg_text = msg_override or default_msg
         since_ts = int(target_entry.get("since_ts", 0) or 0)
         since_text = f"<t:{since_ts}:R>" if since_ts > 0 else "N/A"
-        content = (
-            f"{target_member.display_name}님은 현재 AFK입니다.\n"
-            f"메시지: {msg_text}\n"
-            f"AFK 시작: {since_text}"
-        )
+        afk_embed = discord.Embed(title="AFK 알림")
+        afk_embed.add_field(name="대상", value=target_member.display_name, inline=False)
+        afk_embed.add_field(name="메시지", value=msg_text, inline=False)
+        afk_embed.add_field(name="AFK 시작", value=since_text, inline=False)
 
-        await self._safe_send_mention_reply(message, content)
+        await self._safe_send_embed(message, afk_embed)
 
         try:
             self._set_last_ts(target_entry, message.channel.id, per_channel, now)
