@@ -120,6 +120,14 @@ class NexiAFK(commands.Cog):
             except Exception:
                 log.exception("임베드 reply/send 모두 실패")
 
+    async def _safe_ctx_send_embed(
+        self, ctx: commands.Context, embed: discord.Embed
+    ) -> None:
+        try:
+            await ctx.send(embed=embed)
+        except Exception:
+            log.exception("임베드 ctx.send 실패")
+
 
     async def _ensure_allowed(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -188,9 +196,12 @@ class NexiAFK(commands.Cog):
             if not entry.get("enabled"):
                 entry["enabled"] = True
                 entry["since_ts"] = now
-                await ctx.send(
-                    f"AFK 활성화됨\n메시지: {entry.get('message_override') or (await self.config.guild(ctx.guild).guild_default_message())}"
+                msg = entry.get("message_override") or (
+                    await self.config.guild(ctx.guild).guild_default_message()
                 )
+                embed = discord.Embed(title="AFK 활성화됨")
+                embed.add_field(name="메시지", value=msg, inline=False)
+                await self._safe_ctx_send_embed(ctx, embed)
                 await self._send_log(
                     ctx.guild,
                     action="AFK ON",
@@ -202,7 +213,8 @@ class NexiAFK(commands.Cog):
                 entry["enabled"] = False
                 entry["since_ts"] = 0
                 entry["last_auto_reply_ts"] = 0
-                await ctx.send("AFK 해제됨")
+                embed = discord.Embed(title="AFK 해제됨")
+                await self._safe_ctx_send_embed(ctx, embed)
                 await self._send_log(
                     ctx.guild,
                     action="AFK OFF",
@@ -238,9 +250,12 @@ class NexiAFK(commands.Cog):
                 await self.config.guild(ctx.guild).guild_default_message()
             )
             auto_clear = "ON" if entry.get("auto_clear_on_message", True) else "OFF"
-            await ctx.send(
-                f"AFK 상태: {'ON' if enabled else 'OFF'}\nAFK 시작: {since_txt}\n메시지: {msg}\n자동 해제: {auto_clear}"
-            )
+            embed = discord.Embed(title="AFK 상태")
+            embed.add_field(name="상태", value="ON" if enabled else "OFF", inline=False)
+            embed.add_field(name="AFK 시작", value=since_txt, inline=False)
+            embed.add_field(name="메시지", value=msg, inline=False)
+            embed.add_field(name="자동 해제", value=auto_clear, inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("AFK 상태 조회 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -268,7 +283,9 @@ class NexiAFK(commands.Cog):
             entry["message_override"] = message
             state[key] = entry
             await self.config.guild(ctx.guild).afk_state.set(state)
-            await ctx.send("개인 AFK 멘트를 설정했습니다.")
+            embed = discord.Embed(title="개인 AFK 멘트를 설정했습니다.")
+            embed.add_field(name="메시지", value=message, inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("AFK 멘트 설정 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -289,7 +306,8 @@ class NexiAFK(commands.Cog):
             entry["message_override"] = None
             state[key] = entry
             await self.config.guild(ctx.guild).afk_state.set(state)
-            await ctx.send("개인 AFK 멘트를 삭제했습니다.")
+            embed = discord.Embed(title="개인 AFK 멘트를 삭제했습니다.")
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("AFK 멘트 삭제 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -306,9 +324,13 @@ class NexiAFK(commands.Cog):
                 key = str(ctx.author.id)
                 entry = state.get(key, self._default_entry())
                 entry.setdefault("auto_clear_on_message", True)
-                await ctx.send(
-                    f"자동 해제: {'ON' if entry.get('auto_clear_on_message', True) else 'OFF'}"
+                embed = discord.Embed(title="자동 해제 상태")
+                embed.add_field(
+                    name="자동 해제",
+                    value="ON" if entry.get("auto_clear_on_message", True) else "OFF",
+                    inline=False,
                 )
+                await self._safe_ctx_send_embed(ctx, embed)
             except Exception:
                 log.exception("자동 해제 상태 조회 실패")
                 await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -330,7 +352,9 @@ class NexiAFK(commands.Cog):
             entry["auto_clear_on_message"] = value
             state[key] = entry
             await self.config.guild(ctx.guild).afk_state.set(state)
-            await ctx.send(f"자동 해제: {'ON' if value else 'OFF'}")
+            embed = discord.Embed(title="자동 해제 설정 완료")
+            embed.add_field(name="자동 해제", value="ON" if value else "OFF", inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("자동 해제 설정 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -520,7 +544,6 @@ class NexiAFK(commands.Cog):
             and author_entry.get("auto_clear_on_message", True)
         ):
             since_ts = int(author_entry.get("since_ts", 0) or 0)
-            duration = _format_duration(max(0, _now_ts() - since_ts))
             author_entry["enabled"] = False
             author_entry["since_ts"] = 0
             author_entry["last_auto_reply_ts"] = 0
@@ -529,8 +552,9 @@ class NexiAFK(commands.Cog):
                 await self.config.guild(message.guild).afk_state.set(afk_state)
             except Exception:
                 log.exception("자동 해제 저장 실패")
+            since_text = f"<t:{since_ts}:R>" if since_ts > 0 else "N/A"
             welcome_embed = discord.Embed(title="돌아오신걸 환영합니다!")
-            welcome_embed.add_field(name="AFK 지속시간", value=duration, inline=False)
+            welcome_embed.add_field(name="AFK 지속시간", value=since_text, inline=False)
             await self._safe_send_embed(message, welcome_embed)
 
         if not message.mentions:
@@ -567,7 +591,7 @@ class NexiAFK(commands.Cog):
         since_ts = int(target_entry.get("since_ts", 0) or 0)
         since_text = f"<t:{since_ts}:R>" if since_ts > 0 else "N/A"
         afk_embed = discord.Embed(title="AFK 알림")
-        afk_embed.add_field(name="대상", value=target_member.display_name, inline=False)
+        afk_embed.add_field(name="대상", value=target_member.mention, inline=False)
         afk_embed.add_field(name="메시지", value=msg_text, inline=False)
         afk_embed.add_field(name="AFK 시작", value=since_text, inline=False)
 
