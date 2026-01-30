@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import discord
 from redbot.core import Config, commands
 
-log = logging.getLogger("red.afkmention")
+log = logging.getLogger("red.nexiafk")
 
 
 DEFAULT_ALLOWED_USER_ID = 1173942304927645786
@@ -20,7 +20,7 @@ def _now_ts() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp())
 
 
-class AFKMention(commands.Cog):
+class NexiAFK(commands.Cog):
     """특정 사용자만 AFK를 사용하고 멘션 시 자동 응답하는 Cog."""
 
     def __init__(self, bot: commands.Bot) -> None:
@@ -56,7 +56,7 @@ class AFKMention(commands.Cog):
             log_channel = guild.get_channel(conf["log_channel_id"])
             if log_channel is None:
                 return
-            embed = discord.Embed(title="AFKMention", description=description)
+            embed = discord.Embed(title="NexiAFK", description=description)
             embed.add_field(name="Action", value=action, inline=True)
             if channel is not None:
                 embed.add_field(name="Channel", value=channel.mention, inline=True)

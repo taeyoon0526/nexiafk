@@ -1,10 +1,10 @@
 {
   "author": [
-    "codex"
+    "taeyoon_0526"
   ],
   "description": "허용된 사용자만 AFK를 사용하고 멘션 시 자동 응답하는 Cog",
-  "install_msg": "AFKMention을 로드했습니다.",
-  "short": "AFK 멘션 자동 응답",
+  "install_msg": "NexiAFK를 로드했습니다.",
+  "short": "NexiAFK 멘션 자동 응답",
   "tags": [
     "afk",
     "mention",

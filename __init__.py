@@ -1,6 +1,6 @@
-from .afkmention import AFKMention
+from .nexiafk import NexiAFK
 
 
 async def setup(bot):
-    await bot.add_cog(AFKMention(bot))
+    await bot.add_cog(NexiAFK(bot))
 

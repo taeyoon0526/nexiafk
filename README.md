@@ -1,9 +1,9 @@
-# AFKMention
+# NexiAFK
 
 Red-DiscordBot v3용 커스텀 AFK Cog입니다. 특정 허용 사용자만 AFK를 사용하며, 직접 멘션 시 자동 응답합니다.
 
 ## 설치 및 로드
-- `[p]load afkmention`
+- `[p]load nexiafk`
 - `[p]help afk`
 - `[p]help afkadmin`
 
