@@ -1,0 +1,15 @@
+{
+  "author": [
+    "codex"
+  ],
+  "description": "허용된 사용자만 AFK를 사용하고 멘션 시 자동 응답하는 Cog",
+  "install_msg": "AFKMention을 로드했습니다.",
+  "short": "AFK 멘션 자동 응답",
+  "tags": [
+    "afk",
+    "mention",
+    "automation"
+  ],
+  "requirements": [],
+  "min_bot_version": "3.5.0"
+}
