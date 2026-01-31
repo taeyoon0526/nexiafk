@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+import re
 
 import discord
+from discord.ext import tasks
 from redbot.core import Config, commands
 
 log = logging.getLogger("red.nexiafk")
@@ -18,6 +20,19 @@ DEFAULT_MESSAGE = (
 
 def _now_ts() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp())
+
+
+def _parse_duration(value: str) -> int | None:
+    value = value.strip().lower()
+    if not value:
+        return None
+    m = re.fullmatch(r"(\d+)([smhd])", value)
+    if not m:
+        return None
+    num = int(m.group(1))
+    unit = m.group(2)
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return num * mult
 
 
 def _format_duration(seconds: int) -> str:
@@ -54,7 +69,14 @@ class NexiAFK(commands.Cog):
             log_channel_id=None,
             enable_owner_default_message_edit=False,
             ignore_bots=True,
+            enable_offduty_autofk=False,
+            offduty_tag="[OFFDUTY]",
         )
+
+        self._auto_task.start()
+
+    def cog_unload(self) -> None:
+        self._auto_task.cancel()
 
     async def _send_log(
         self,
@@ -120,6 +142,12 @@ class NexiAFK(commands.Cog):
             except Exception:
                 log.exception("임베드 reply/send 모두 실패")
 
+    async def _safe_dm(self, user: discord.abc.User, embed: discord.Embed) -> None:
+        try:
+            await user.send(embed=embed)
+        except Exception:
+            log.exception("DM 전송 실패")
+
     async def _safe_ctx_send_embed(
         self, ctx: commands.Context, embed: discord.Embed
     ) -> None:
@@ -146,6 +174,9 @@ class NexiAFK(commands.Cog):
             "message_override": None,
             "last_auto_reply_ts": 0,
             "auto_clear_on_message": True,
+            "auto_afk_seconds": 0,
+            "auto_afk_enabled": False,
+            "last_activity_ts": 0,
         }
 
     def _get_last_ts(
@@ -313,6 +344,53 @@ class NexiAFK(commands.Cog):
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
 
     
+    
+    @afk_group.command(name="auto")
+    async def afk_auto(self, ctx: commands.Context, duration: Optional[str] = None) -> None:
+        """활동이 없을 때 자동 AFK 설정/토글."""
+        if not await self._ensure_allowed(ctx):
+            return
+        try:
+            state = await self.config.guild(ctx.guild).afk_state()
+            key = str(ctx.author.id)
+            entry = state.get(key, self._default_entry())
+            entry.setdefault("auto_afk_enabled", False)
+            entry.setdefault("auto_afk_seconds", 0)
+            entry.setdefault("last_activity_ts", 0)
+
+            if duration is None:
+                if entry.get("auto_afk_seconds", 0) <= 0:
+                    embed = discord.Embed(title="자동 AFK", description="먼저 시간(예: 10m, 1h, 1d)을 설정해주세요.")
+                    await self._safe_ctx_send_embed(ctx, embed)
+                    return
+                entry["auto_afk_enabled"] = not entry.get("auto_afk_enabled", False)
+                state[key] = entry
+                await self.config.guild(ctx.guild).afk_state.set(state)
+                embed = discord.Embed(title="자동 AFK 토글")
+                embed.add_field(name="상태", value="ON" if entry.get("auto_afk_enabled") else "OFF", inline=False)
+                embed.add_field(name="시간", value=_format_duration(int(entry.get("auto_afk_seconds"))) , inline=False)
+                await self._safe_ctx_send_embed(ctx, embed)
+                return
+
+            seconds = _parse_duration(duration)
+            if seconds is None or seconds <= 0:
+                embed = discord.Embed(title="자동 AFK", description="시간 형식이 올바르지 않습니다. 예: 10m, 1h, 1d")
+                await self._safe_ctx_send_embed(ctx, embed)
+                return
+
+            entry["auto_afk_seconds"] = seconds
+            entry["auto_afk_enabled"] = True
+            entry["last_activity_ts"] = _now_ts()
+            state[key] = entry
+            await self.config.guild(ctx.guild).afk_state.set(state)
+            embed = discord.Embed(title="자동 AFK 설정 완료")
+            embed.add_field(name="시간", value=_format_duration(seconds), inline=False)
+            embed.add_field(name="상태", value="ON", inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
+        except Exception:
+            log.exception("자동 AFK 설정 실패")
+            await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+
     @afk_group.command(name="autoclear")
     async def afk_autoclear(self, ctx: commands.Context, mode: Optional[str] = None) -> None:
         """메시지 전송 시 AFK 자동 해제 토글."""
@@ -363,7 +441,9 @@ class NexiAFK(commands.Cog):
     @commands.is_owner()
     async def afk_admin(self, ctx: commands.Context) -> None:
         """AFK 허용 사용자 관리."""
-        await ctx.send("사용 가능한 하위 명령어: add/remove/list/reset/setdefault/toggledefault/togglebots")
+        embed = discord.Embed(title="AFK 관리자")
+        embed.add_field(name="명령어", value="add/remove/list/reset/setdefault/toggledefault/togglebots/toggleoffduty", inline=False)
+        await self._safe_ctx_send_embed(ctx, embed)
 
     @afk_admin.command(name="add")
     @commands.is_owner()
@@ -382,7 +462,9 @@ class NexiAFK(commands.Cog):
                 return
             allowed.append(user.id)
             await self.config.guild(ctx.guild).allowed_user_ids.set(allowed)
-            await ctx.send(f"허용 사용자에 추가했습니다: {user} ({user.id})")
+            embed = discord.Embed(title="허용 사용자 추가")
+            embed.add_field(name="사용자", value=f"{user} ({user.id})", inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("허용 사용자 추가 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -404,7 +486,9 @@ class NexiAFK(commands.Cog):
             warn = ""
             if user.id == DEFAULT_ALLOWED_USER_ID:
                 warn = " (기본 허용 사용자 제거됨)"
-            await ctx.send(f"허용 사용자에서 제거했습니다: {user} ({user.id}){warn}")
+            embed = discord.Embed(title="허용 사용자 제거")
+            embed.add_field(name="사용자", value=f"{user} ({user.id}){warn}", inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("허용 사용자 제거 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -422,7 +506,9 @@ class NexiAFK(commands.Cog):
             for uid in allowed:
                 member = ctx.guild.get_member(uid)
                 mentions.append(member.mention if member else f"<@{uid}>")
-            await ctx.send("허용 사용자 목록:\n" + " ".join(mentions))
+            embed = discord.Embed(title="허용 사용자 목록")
+            embed.description = " ".join(mentions)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("허용 사용자 목록 조회 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -436,7 +522,8 @@ class NexiAFK(commands.Cog):
             return
         try:
             await self.config.guild(ctx.guild).allowed_user_ids.set([DEFAULT_ALLOWED_USER_ID])
-            await ctx.send("허용 사용자 목록을 기본값으로 초기화했습니다.")
+            embed = discord.Embed(title="허용 사용자 목록 초기화")
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("허용 사용자 초기화 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -453,13 +540,14 @@ class NexiAFK(commands.Cog):
             await self.config.guild(ctx.guild).enable_owner_default_message_edit.set(
                 not current
             )
-            await ctx.send(
-                f"기본 멘트 변경 허용: {'ON' if not current else 'OFF'}"
-            )
+            embed = discord.Embed(title="기본 멘트 변경 허용")
+            embed.add_field(name="상태", value="ON" if not current else "OFF", inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("toggledefault 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
 
+    
     @afk_admin.command(name="togglebots")
     @commands.is_owner()
     async def afk_admin_togglebots(self, ctx: commands.Context) -> None:
@@ -470,10 +558,30 @@ class NexiAFK(commands.Cog):
         try:
             current = await self.config.guild(ctx.guild).ignore_bots()
             await self.config.guild(ctx.guild).ignore_bots.set(not current)
-            await ctx.send(f"봇 메시지 무시: {'ON' if not current else 'OFF'}")
+            embed = discord.Embed(title="봇 메시지 무시")
+            embed.add_field(name="상태", value="ON" if not current else "OFF", inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("togglebots 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+
+    @afk_admin.command(name="toggleoffduty")
+    @commands.is_owner()
+    async def afk_admin_toggleoffduty(self, ctx: commands.Context) -> None:
+        """[OFFDUTY] 닉네임 자동 AFK 토글."""
+        if ctx.guild is None:
+            await ctx.send("이 명령어는 DM에서 사용할 수 없습니다.")
+            return
+        try:
+            current = await self.config.guild(ctx.guild).enable_offduty_autofk()
+            await self.config.guild(ctx.guild).enable_offduty_autofk.set(not current)
+            embed = discord.Embed(title="[OFFDUTY] 자동 AFK")
+            embed.add_field(name="상태", value="ON" if not current else "OFF", inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
+        except Exception:
+            log.exception("toggleoffduty 실패")
+            await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+
 
     @afk_admin.command(name="setdefault")
     @commands.is_owner()
@@ -492,7 +600,9 @@ class NexiAFK(commands.Cog):
                 await ctx.send("메시지는 1~200자여야 합니다.")
                 return
             await self.config.guild(ctx.guild).guild_default_message.set(message)
-            await ctx.send("기본 AFK 멘트를 변경했습니다.")
+            embed = discord.Embed(title="기본 AFK 멘트 변경")
+            embed.add_field(name="메시지", value=message, inline=False)
+            await self._safe_ctx_send_embed(ctx, embed)
         except Exception:
             log.exception("기본 멘트 변경 실패")
             await ctx.send("일시적 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -533,6 +643,34 @@ class NexiAFK(commands.Cog):
 
         allowed = set(conf.get("allowed_user_ids", []))
         afk_state = conf.get("afk_state", {})
+
+        # 활동 기록 업데이트
+        author_key = str(message.author.id)
+        if message.author.id in allowed:
+            entry = afk_state.get(author_key, self._default_entry())
+            entry.setdefault("last_activity_ts", 0)
+            entry["last_activity_ts"] = _now_ts()
+            afk_state[author_key] = entry
+            try:
+                await self.config.guild(message.guild).afk_state.set(afk_state)
+            except Exception:
+                log.exception("활동 기록 저장 실패")
+
+        # [OFFDUTY] 자동 AFK (길드 메시지 없음)
+        if conf.get("enable_offduty_autofk") and message.author.id in allowed:
+            tag = conf.get("offduty_tag") or "[OFFDUTY]"
+            display_name = getattr(message.author, "display_name", message.author.name)
+            entry = afk_state.get(author_key, self._default_entry())
+            if tag in display_name and not entry.get("enabled"):
+                entry["enabled"] = True
+                entry["since_ts"] = _now_ts()
+                entry["last_auto_reply_ts"] = 0
+                afk_state[author_key] = entry
+                try:
+                    await self.config.guild(message.guild).afk_state.set(afk_state)
+                except Exception:
+                    log.exception("OFFDUTY 자동 AFK 저장 실패")
+
 
         # AFK 사용자가 메시지를 보내면 자동 해제 (기본 ON)
         author_key = str(message.author.id)
@@ -612,3 +750,91 @@ class NexiAFK(commands.Cog):
             )
         except Exception:
             log.exception("자동 응답 후 상태 저장 실패")
+
+
+    @tasks.loop(seconds=60)
+    async def _auto_task(self) -> None:
+        now = _now_ts()
+        for guild in self.bot.guilds:
+            try:
+                conf = await self.config.guild(guild).all()
+            except Exception:
+                log.exception("Config 읽기 실패(자동 AFK)")
+                continue
+            allowed = set(conf.get("allowed_user_ids", []))
+            afk_state = conf.get("afk_state", {})
+            changed = False
+            for uid_str, entry in afk_state.items():
+                try:
+                    uid = int(uid_str)
+                except ValueError:
+                    continue
+                if uid not in allowed:
+                    continue
+                entry.setdefault("auto_afk_enabled", False)
+                entry.setdefault("auto_afk_seconds", 0)
+                entry.setdefault("last_activity_ts", 0)
+                if entry.get("enabled"):
+                    continue
+                if not entry.get("auto_afk_enabled"):
+                    continue
+                seconds = int(entry.get("auto_afk_seconds") or 0)
+                if seconds <= 0:
+                    continue
+                last_act = int(entry.get("last_activity_ts") or 0)
+                if last_act <= 0:
+                    continue
+                if now - last_act < seconds:
+                    continue
+                entry["enabled"] = True
+                entry["since_ts"] = now
+                entry["last_auto_reply_ts"] = 0
+                afk_state[uid_str] = entry
+                changed = True
+                member = guild.get_member(uid)
+                if member is not None:
+                    embed = discord.Embed(title="AFK 자동 활성화")
+                    embed.add_field(name="서버", value=guild.name, inline=False)
+                    embed.add_field(name="AFK 시작", value=f"<t:{now}:R>", inline=False)
+                    await self._safe_dm(member, embed)
+            if changed:
+                try:
+                    await self.config.guild(guild).afk_state.set(afk_state)
+                except Exception:
+                    log.exception("자동 AFK 저장 실패")
+
+    @_auto_task.before_loop
+    async def _before_auto_task(self) -> None:
+        await self.bot.wait_until_red_ready()
+
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        if after.guild is None:
+            return
+        try:
+            conf = await self.config.guild(after.guild).all()
+        except Exception:
+            log.exception("Config 읽기 실패(멤버 업데이트)")
+            return
+        if not conf.get("enable_offduty_autofk"):
+            return
+        allowed = set(conf.get("allowed_user_ids", []))
+        if after.id not in allowed:
+            return
+        tag = conf.get("offduty_tag") or "[OFFDUTY]"
+        if tag not in after.display_name:
+            return
+        state = conf.get("afk_state", {})
+        key = str(after.id)
+        entry = state.get(key, self._default_entry())
+        if entry.get("enabled"):
+            return
+        entry["enabled"] = True
+        entry["since_ts"] = _now_ts()
+        entry["last_auto_reply_ts"] = 0
+        state[key] = entry
+        try:
+            await self.config.guild(after.guild).afk_state.set(state)
+        except Exception:
+            log.exception("OFFDUTY 자동 AFK 저장 실패(멤버 업데이트)")
